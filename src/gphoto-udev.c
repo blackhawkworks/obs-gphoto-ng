@@ -1,5 +1,16 @@
-#include <obs-internal.h>
+#include <obs/obs-module.h>
+#include <obs/util/platform.h>
+#include <obs/util/threading.h>
+#include <obs/callback/signal.h>
+#include <obs/callback/calldata.h>
 #include <libudev.h>
+#include <pthread.h>
+#include <sys/select.h>
+#include <string.h>
+#include <errno.h>
+#include <stdint.h>
+
+#include "gphoto-udev.h"
 
 enum udev_action {
     UDEV_ACTION_ADDED,
@@ -8,20 +19,19 @@ enum udev_action {
 };
 
 static const char *udev_signals[] = {
-        "void device_added(string device)",
-        "void device_removed(string device)",
-        NULL
+    "void device_added(string device)",
+    "void device_removed(string device)",
+    NULL
 };
 
 /* global data */
-static uint_fast32_t udev_refs    = 0;
+static uint_fast32_t udev_refs = 0;
 static pthread_mutex_t udev_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 static pthread_t udev_thread;
-static os_event_t *udev_event;
+static os_event_t *udev_event = NULL;
 
 static signal_handler_t *udev_signalhandler = NULL;
-
 
 static enum udev_action udev_action_to_enum(const char *action) {
     if (!action)
@@ -35,25 +45,32 @@ static enum udev_action udev_action_to_enum(const char *action) {
     return UDEV_ACTION_UNKNOWN;
 }
 
-static inline void udev_signal_event(struct udev_device *dev){
+static inline void udev_signal_event(struct udev_device *dev) {
     enum udev_action action;
     struct calldata data;
+    const char *devnode;
 
     action = udev_action_to_enum(udev_device_get_action(dev));
 
     pthread_mutex_lock(&udev_mutex);
 
-    switch (action) {
-        case UDEV_ACTION_ADDED:
-            signal_handler_signal(udev_signalhandler,
-                                  "device_added", &data);
-            break;
-        case UDEV_ACTION_REMOVED:
-            signal_handler_signal(udev_signalhandler,
-                                  "device_removed", &data);
-            break;
-        default:
-            break;
+    if (udev_signalhandler) {
+        devnode = udev_device_get_devnode(dev);
+        calldata_init(&data);
+        calldata_set_string(&data, "device", devnode ? devnode : "");
+
+        switch (action) {
+            case UDEV_ACTION_ADDED:
+                signal_handler_signal(udev_signalhandler, "device_added", &data);
+                break;
+            case UDEV_ACTION_REMOVED:
+                signal_handler_signal(udev_signalhandler, "device_removed", &data);
+                break;
+            default:
+                break;
+        }
+
+        calldata_free(&data);
     }
 
     pthread_mutex_unlock(&udev_mutex);
@@ -71,10 +88,21 @@ static void *udev_event_thread(void *vptr) {
 
     /* set up udev monitoring */
     udev = udev_new();
-    mon  = udev_monitor_new_from_netlink(udev, "udev");
-    udev_monitor_filter_add_match_subsystem_devtype(mon, "usb", NULL);
-    if (udev_monitor_enable_receiving(mon) < 0)
+    if (!udev)
         return NULL;
+
+    mon = udev_monitor_new_from_netlink(udev, "udev");
+    if (!mon) {
+        udev_unref(udev);
+        return NULL;
+    }
+
+    udev_monitor_filter_add_match_subsystem_devtype(mon, "usb", NULL);
+    if (udev_monitor_enable_receiving(mon) < 0) {
+        udev_monitor_unref(mon);
+        udev_unref(udev);
+        return NULL;
+    }
 
     /* set up fds */
     fd = udev_monitor_get_fd(mon);
@@ -82,7 +110,7 @@ static void *udev_event_thread(void *vptr) {
     while (os_event_try(udev_event) == EAGAIN) {
         FD_ZERO(&fds);
         FD_SET(fd, &fds);
-        tv.tv_sec  = 1;
+        tv.tv_sec = 1;
         tv.tv_usec = 0;
 
         if (select(fd + 1, &fds, NULL, NULL, &tv) <= 0)
@@ -110,18 +138,26 @@ void gphoto_init_udev(void) {
     if (udev_refs == 0) {
         if (os_event_init(&udev_event, OS_EVENT_TYPE_MANUAL) != 0)
             goto fail;
-        if (pthread_create(&udev_thread, NULL, udev_event_thread, NULL) != 0)
-            goto fail;
 
         udev_signalhandler = signal_handler_create();
-        if (!udev_signalhandler)
+        if (!udev_signalhandler) {
+            os_event_destroy(udev_event);
+            udev_event = NULL;
             goto fail;
+        }
         signal_handler_add_array(udev_signalhandler, udev_signals);
 
+        if (pthread_create(&udev_thread, NULL, udev_event_thread, NULL) != 0) {
+            signal_handler_destroy(udev_signalhandler);
+            udev_signalhandler = NULL;
+            os_event_destroy(udev_event);
+            udev_event = NULL;
+            goto fail;
+        }
     }
     udev_refs++;
 
-    fail:
+fail:
     pthread_mutex_unlock(&udev_mutex);
 }
 
@@ -130,18 +166,22 @@ void gphoto_unref_udev(void) {
 
     /* unref udev monitor */
     if (udev_refs && --udev_refs == 0) {
-        os_event_signal(udev_event);
-        pthread_join(udev_thread, NULL);
-        os_event_destroy(udev_event);
+        if (udev_event) {
+            os_event_signal(udev_event);
+            pthread_join(udev_thread, NULL);
+            os_event_destroy(udev_event);
+            udev_event = NULL;
+        }
 
-        if (udev_signalhandler)
+        if (udev_signalhandler) {
             signal_handler_destroy(udev_signalhandler);
-        udev_signalhandler = NULL;
+            udev_signalhandler = NULL;
+        }
     }
 
     pthread_mutex_unlock(&udev_mutex);
 }
 
-signal_handler_t *gphoto_get_udev_signalhandler(void){
+signal_handler_t *gphoto_get_udev_signalhandler(void) {
     return udev_signalhandler;
 }

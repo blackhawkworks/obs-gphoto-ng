@@ -1,63 +1,75 @@
-cmake_minimum_required(VERSION 2.8)
-project(obs-gphoto)
-set(obs-gphoto_DESCRIPTION "Allows connect DSLR cameras with obs-studio through gPhoto on Linux.")
-set(obs-gphoto_VERSION_MAJOR 0)
-set(obs-gphoto_VERSION_MINOR 3)
-set(obs-gphoto_VERSION_PATCH 0)
-set(CMAKE_BUILD_TYPE Release)
+cmake_minimum_required(VERSION 3.16)
 
-list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake/modules/")
+project(obs-gphoto
+    VERSION 0.3.0
+    DESCRIPTION "Allows connecting DSLR cameras with OBS Studio through gPhoto on Linux"
+    LANGUAGES C
+)
 
-find_package(LibObs)
-if(${LibObs_FOUND})
-    message(STATUS "LibObs FOUND")
-else()
-    message(FATAL_ERROR "LibObs NOT FOUND")
+set(CMAKE_C_STANDARD 11)
+set(CMAKE_C_STANDARD_REQUIRED ON)
+
+if(NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE "Release" CACHE STRING "Choose the type of build." FORCE)
 endif()
 
-find_package(Gphoto2)
-if(${GPHOTO2_FOUND})
-    message(STATUS "Gphoto2 FOUND")
-else()
-    message(FATAL_ERROR "Gphoto2 NOT FOUND")
+# Use PkgConfig for native Debian package discovery
+find_package(PkgConfig REQUIRED)
+
+pkg_check_modules(LIBOBS REQUIRED IMPORTED_TARGET libobs)
+pkg_check_modules(GPHOTO2 REQUIRED IMPORTED_TARGET libgphoto2)
+pkg_check_modules(MAGICK REQUIRED IMPORTED_TARGET MagickCore)
+
+option(ENABLE_UDEV "Enable udev support" ON)
+if(ENABLE_UDEV)
+    pkg_check_modules(UDEV IMPORTED_TARGET libudev)
 endif()
 
-find_package(ImageMagick COMPONENTS MagickCore)
-if(${ImageMagick_MagickCore_FOUND})
-    message(STATUS "MagickCore FOUND")
-else()
-    message(FATAL_ERROR "MagickCore NOT FOUND")
+set(SOURCE_FILES
+    src/obs-gphoto.c
+    src/gphoto-utils.c
+    src/gphoto-preview.c
+    src/timelapse.c
+)
+
+if(UDEV_FOUND)
+    list(APPEND SOURCE_FILES src/gphoto-udev.c)
 endif()
-
-find_package(udev)
-if(NOT UDEV_FOUND OR DISABLE_UDEV)
-    message(STATUS "udev disabled for v4l2 plugin")
-else()
-    set(gphoto-udev_SOURCES src/gphoto-udev.c src/gphoto-udev.h)
-    add_definitions(-DHAVE_UDEV)
-endif()
-
-math(EXPR BITS "8*${CMAKE_SIZEOF_VOID_P}")
-set(PLUGIN_DIRECTORY "${CMAKE_BINARY_DIR}/build/obs-gphoto")
-set(PLUGIN_BIN_DIRECTORY "${PLUGIN_DIRECTORY}/bin/${BITS}bit")
-
-set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${PLUGIN_BIN_DIRECTORY})
-set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${PLUGIN_BIN_DIRECTORY})
-
-include_directories(src ${LIBOBS_INCLUDE_DIRS} ${Gphoto2_INCLUDE_DIRS} ${ImageMagick_MagickCore_INCLUDE_DIRS} ${UDEV_INCLUDE_DIR})
-
-set(SOURCE_FILES src/obs-gphoto.c src/gphoto-utils.c src/gphoto-utils.h ${gphoto-udev_SOURCES}
-        src/gphoto-preview.c src/gphoto-preview.h
-        src/timelapse.c src/timelapse.h)
 
 add_library(obs-gphoto MODULE ${SOURCE_FILES})
 
-SET_TARGET_PROPERTIES(obs-gphoto PROPERTIES PREFIX "")
-target_link_libraries(obs-gphoto ${LIBOBS_LIBRARIES} ${Gphoto2_LIBRARIES} ${ImageMagick_LIBRARIES} ${UDEV_LIBRARIES})
+target_include_directories(obs-gphoto PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
 
-# install
-if(${SYSTEM_INSTALL})
-    install(TARGETS obs-gphoto DESTINATION ${LIBOBS_PLUGIN_DESTINATION})
+# Target-based linking via modern PkgConfig targets
+target_link_libraries(obs-gphoto PRIVATE
+    PkgConfig::LIBOBS
+    PkgConfig::GPHOTO2
+    PkgConfig::MAGICK
+)
+
+if(UDEV_FOUND)
+    target_link_libraries(obs-gphoto PRIVATE PkgConfig::UDEV)
+    target_compile_definitions(obs-gphoto PRIVATE HAVE_UDEV)
+endif()
+
+set_target_properties(obs-gphoto PROPERTIES
+    PREFIX ""
+    C_VISIBILITY_PRESET hidden
+)
+
+include(GNUInstallDirs)
+
+option(SYSTEM_INSTALL "Install system-wide instead of user config directory" OFF)
+
+if(SYSTEM_INSTALL)
+    install(TARGETS obs-gphoto
+        DESTINATION "${CMAKE_INSTALL_LIBDIR}/obs-plugins"
+    )
 else()
-    install(DIRECTORY ${PLUGIN_DIRECTORY} DESTINATION $ENV{HOME}/.config/obs-studio/plugins USE_SOURCE_PERMISSIONS)
+    math(EXPR BITS "8 * ${CMAKE_SIZEOF_VOID_P}")
+    install(TARGETS obs-gphoto
+        DESTINATION "$ENV{HOME}/.config/obs-studio/plugins/obs-gphoto/bin/${BITS}bit"
+    )
 endif()

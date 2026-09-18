@@ -1,6 +1,13 @@
-#include <obs-module.h>
-#include <obs-internal.h>
+#ifndef TIMELAPSE_H
+#define TIMELAPSE_H
+
+#include <obs/obs-module.h>
 #include <gphoto2/gphoto2-camera.h>
+#include <pthread.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 struct timelapse_data {
     /* settings */
@@ -25,3 +32,9 @@ struct timelapse_data {
     obs_hotkey_id capture_key;
     uint64_t last_capture_time;
 };
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* TIMELAPSE_H */

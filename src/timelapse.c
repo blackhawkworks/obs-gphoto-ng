@@ -1,12 +1,14 @@
-#include <magick/MagickCore.h>
+#include <stdlib.h>
+#include <string.h>
+#include <pthread.h>
+#include <obs/util/platform.h>
+#include <MagickCore/MagickCore.h>
 
 #include "timelapse.h"
 #include "gphoto-utils.h"
 #if HAVE_UDEV
 #include "gphoto-udev.h"
 #endif
-
-
 
 static const char *timelapse_getname(void *vptr) {
     UNUSED_PARAMETER(vptr);
@@ -17,40 +19,48 @@ static void timelapse_defaults(obs_data_t *settings) {
     obs_data_set_default_int(settings, "interval", 30);
 }
 
-static bool test_capture_callback(obs_properties_t *props, obs_property_t *prop, void *vptr){
+static bool test_capture_callback(obs_properties_t *props, obs_property_t *prop, void *vptr) {
     UNUSED_PARAMETER(prop);
     UNUSED_PARAMETER(props);
     struct timelapse_data *data = vptr;
+
+    if (!data || !data->camera) return true;
 
     pthread_mutex_lock(&data->camera_mutex);
     gphoto_capture(data->camera, data->gp_context, data->width, data->height, data->texture_data);
     pthread_mutex_unlock(&data->camera_mutex);
 
-    obs_enter_graphics();
-    gs_texture_set_image(data->texture, data->texture_data, data->width * 4, false);
-    obs_leave_graphics();
+    if (data->texture && data->texture_data) {
+        obs_enter_graphics();
+        gs_texture_set_image(data->texture, data->texture_data, data->width * 4, false);
+        obs_leave_graphics();
+    }
 
-    return TRUE;
+    return true;
 }
 
-static void capture_hotkey_pressed(void *vptr, obs_hotkey_id id, obs_hotkey_t *key, bool pressed){
+static void capture_hotkey_pressed(void *vptr, obs_hotkey_id id, obs_hotkey_t *key, bool pressed) {
     UNUSED_PARAMETER(id);
-	UNUSED_PARAMETER(key);
+    UNUSED_PARAMETER(key);
     struct timelapse_data *data = vptr;
+    if (!data || !data->camera) return;
+
     uint64_t delta_time = os_gettime_ns() - data->last_capture_time;
-    if(pressed && delta_time >= 500000000 && obs_source_active(data->source)) {
+    if (pressed && delta_time >= 500000000 && obs_source_active(data->source)) {
         pthread_mutex_lock(&data->camera_mutex);
         gphoto_capture(data->camera, data->gp_context, data->width, data->height, data->texture_data);
         pthread_mutex_unlock(&data->camera_mutex);
 
-        obs_enter_graphics();
-        gs_texture_set_image(data->texture, data->texture_data, data->width * 4, false);
-        obs_leave_graphics();
+        if (data->texture && data->texture_data) {
+            obs_enter_graphics();
+            gs_texture_set_image(data->texture, data->texture_data, data->width * 4, false);
+            obs_leave_graphics();
+        }
         data->last_capture_time = os_gettime_ns();
     }
 }
 
-static bool timelapse_camera_selected(obs_properties_t *props, obs_property_t *prop, obs_data_t *settings){
+static bool timelapse_camera_selected(obs_properties_t *props, obs_property_t *prop, obs_data_t *settings) {
     UNUSED_PARAMETER(props);
     UNUSED_PARAMETER(prop);
     obs_data_set_string(settings, "changed", "camera");
@@ -58,7 +68,7 @@ static bool timelapse_camera_selected(obs_properties_t *props, obs_property_t *p
     return true;
 }
 
-static bool timelapse_interval_changed(obs_properties_t *props, obs_property_t *prop, obs_data_t *settings){
+static bool timelapse_interval_changed(obs_properties_t *props, obs_property_t *prop, obs_data_t *settings) {
     UNUSED_PARAMETER(props);
     UNUSED_PARAMETER(prop);
     obs_data_set_string(settings, "changed", "interval");
@@ -66,19 +76,18 @@ static bool timelapse_interval_changed(obs_properties_t *props, obs_property_t *
     return true;
 }
 
-static obs_properties_t *timelapse_properties(void *vptr){
+static obs_properties_t *timelapse_properties(void *vptr) {
     struct timelapse_data *data = vptr;
 
     obs_properties_t *props = obs_properties_create();
     obs_data_t *settings = obs_source_get_settings(data->source);
 
     int cam_count = gp_list_count(data->cam_list);
-    if(cam_count > 0) {
+    if (cam_count > 0) {
         obs_property_t *cam_list = obs_properties_add_list(props, "camera_name", obs_module_text("Camera"),
                                                            OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_STRING);
         property_cam_list(data->cam_list, cam_list);
         obs_property_set_modified_callback(cam_list, timelapse_camera_selected);
-
 
         obs_property_t *interval = obs_properties_add_int(props, "interval", obs_module_text("Interval(in seconds)"),
                                                           0, 100000, 1);
@@ -113,13 +122,13 @@ static void timelapse_init(void *vptr) {
     CameraFile *cam_file = NULL;
     CameraFilePath camera_file_path;
     const char *image_data = NULL;
-    unsigned long data_size = NULL;
+    size_t data_size = 0;
     Image *image = NULL;
     ImageInfo *image_info = AcquireImageInfo();
     ExceptionInfo *exception = AcquireExceptionInfo();
 
     if (gp_file_new(&cam_file) < GP_OK) {
-        blog(LOG_WARNING, "What???\n");
+        blog(LOG_WARNING, "Failed to create gphoto CameraFile handle.\n");
     } else {
         if (gp_camera_by_name(&data->camera, data->camera_name, data->cam_list, data->gp_context) < GP_OK) {
             blog(LOG_WARNING, "Can't get camera.\n");
@@ -142,26 +151,27 @@ static void timelapse_init(void *vptr) {
                             image = BlobToImage(image_info, image_data, data_size, exception);
                             if (exception->severity != UndefinedException) {
                                 CatchException(exception);
-                                blog(LOG_WARNING, "ImageMagic error: %s.\n", (char *) exception->severity);
+                                blog(LOG_WARNING, "ImageMagick error: %s.\n", exception->reason ? exception->reason : "Unknown");
                                 exception->severity = UndefinedException;
-                            } else {
+                            } else if (image) {
                                 data->width = (uint32_t) image->magick_columns;
                                 data->height = (uint32_t) image->magick_rows;
 
+                                if (data->texture_data) free(data->texture_data);
                                 data->texture_data = malloc(data->width * data->height * 4);
 
                                 ExportImagePixels(image, 0, 0, data->width, data->height, "BGRA", CharPixel,
-                                                  data->texture_data,
-                                                  exception);
+                                                  data->texture_data, exception);
                                 if (exception->severity != UndefinedException) {
                                     CatchException(exception);
-                                    blog(LOG_WARNING, "ImageMagic error: %s.\n", (char *) exception->severity);
+                                    blog(LOG_WARNING, "ImageMagick error: %s.\n", exception->reason ? exception->reason : "Unknown");
                                     exception->severity = UndefinedException;
                                 } else {
                                     obs_enter_graphics();
+                                    if (data->texture) gs_texture_destroy(data->texture);
+                                    const uint8_t *ptr = data->texture_data;
                                     data->texture = gs_texture_create(data->width, data->height, GS_BGRA, 1,
-                                                                      &data->texture_data,
-                                                                      GS_DYNAMIC);
+                                                                      &ptr, GS_DYNAMIC);
                                     obs_leave_graphics();
                                     goto exit;
                                 }
@@ -176,47 +186,52 @@ static void timelapse_init(void *vptr) {
     data->width = 0;
     data->height = 0;
     obs_enter_graphics();
+    if (data->texture) gs_texture_destroy(data->texture);
     data->texture = gs_texture_create(data->width, data->height, GS_BGRA, 1, NULL, GS_DYNAMIC);
     obs_leave_graphics();
 
-    exit:
-    if(image_data){
-        free(image_data);
-    }
-    if(image_info){
+exit:
+    if (image_info) {
         DestroyImageInfo(image_info);
     }
-    if(image){
+    if (image) {
         DestroyImageList(image);
     }
-    if(exception){
+    if (exception) {
         DestroyExceptionInfo(exception);
+    }
+    if (cam_file) {
+        gp_file_unref(cam_file);
     }
 }
 
-static void timelapse_terminate(void *vptr){
+static void timelapse_terminate(void *vptr) {
     struct timelapse_data *data = vptr;
-
-    gp_camera_exit(data->camera, data->gp_context);
-    gp_camera_free(data->camera);
-    data->camera = NULL;
-    free(data->texture_data);
+    if (data->camera) {
+        gp_camera_exit(data->camera, data->gp_context);
+        gp_camera_free(data->camera);
+        data->camera = NULL;
+    }
+    if (data->texture_data) {
+        free(data->texture_data);
+        data->texture_data = NULL;
+    }
 }
 
-static void timelapse_update(void *vptr, obs_data_t *settings){
+static void timelapse_update(void *vptr, obs_data_t *settings) {
     struct timelapse_data *data = vptr;
 
     const char *changed = obs_data_get_string(settings, "changed");
 
     if (strcmp(changed, "camera") == 0) {
         data->camera_name = obs_data_get_string(settings, "camera_name");
-        if (data->source->active) {
+        if (obs_source_active(data->source)) {
             timelapse_terminate(data);
             pthread_mutex_lock(&data->camera_mutex);
             timelapse_init(data);
             pthread_mutex_unlock(&data->camera_mutex);
             obs_source_update_properties(data->source);
-            if(data->autofocus) {
+            if (data->autofocus) {
                 pthread_mutex_lock(&data->camera_mutex);
                 set_autofocus(data->camera, data->gp_context);
                 pthread_mutex_unlock(&data->camera_mutex);
@@ -224,17 +239,17 @@ static void timelapse_update(void *vptr, obs_data_t *settings){
         }
     }
 
-    if(strcmp(changed, "interval") == 0){
+    if (strcmp(changed, "interval") == 0) {
         data->interval = obs_data_get_int(settings, "interval");
     }
 
     if (strcmp(changed, "autofocus") == 0) {
         data->autofocus = obs_data_get_bool(settings, "autofocusdrive");
-        if(data->autofocus) {
+        if (data->autofocus) {
             pthread_mutex_lock(&data->camera_mutex);
             set_autofocus(data->camera, data->gp_context);
             pthread_mutex_unlock(&data->camera_mutex);
-        }else{
+        } else {
             pthread_mutex_lock(&data->camera_mutex);
             cancel_autofocus(data->camera, data->gp_context);
             pthread_mutex_unlock(&data->camera_mutex);
@@ -261,17 +276,17 @@ static void timelapse_camera_added(void *vptr, calldata_t *calldata) {
     struct timelapse_data *data = vptr;
     int i, count;
     const char *camera_name;
-    if(!data->camera){
+    if (!data->camera) {
         pthread_mutex_lock(&data->camera_mutex);
         gphoto_cam_list(data->cam_list, data->gp_context);
         count = gp_list_count(data->cam_list);
-        for(i=0; i<count; i++){
+        for (i = 0; i < count; i++) {
             gp_list_get_name(data->cam_list, i, &camera_name);
-            if (strcmp(camera_name, data->camera_name) == 0) {
+            if (camera_name && strcmp(camera_name, data->camera_name) == 0) {
                 timelapse_init(data);
                 pthread_mutex_unlock(&data->camera_mutex);
                 obs_source_update_properties(data->source);
-                if(data->autofocus) {
+                if (data->autofocus) {
                     pthread_mutex_lock(&data->camera_mutex);
                     set_autofocus(data->camera, data->gp_context);
                     pthread_mutex_unlock(&data->camera_mutex);
@@ -288,15 +303,14 @@ static void timelapse_camera_removed(void *vptr, calldata_t *calldata) {
     struct timelapse_data *data = vptr;
     int i, count;
     const char *camera_name;
-    if(data->camera){
+    if (data->camera) {
         pthread_mutex_lock(&data->camera_mutex);
         gphoto_cam_list(data->cam_list, data->gp_context);
         pthread_mutex_unlock(&data->camera_mutex);
         count = gp_list_count(data->cam_list);
-        for(i=0; i<count; i++){
+        for (i = 0; i < count; i++) {
             gp_list_get_name(data->cam_list, i, &camera_name);
-            if (strcmp(camera_name, data->camera_name) == 0) {
-                pthread_mutex_unlock(&data->camera_mutex);
+            if (camera_name && strcmp(camera_name, data->camera_name) == 0) {
                 return;
             }
         }
@@ -308,23 +322,24 @@ static void timelapse_camera_removed(void *vptr, calldata_t *calldata) {
 
 static void timelapse_show(void *vptr) {
     struct timelapse_data *data = vptr;
-    if (strcmp(data->camera_name, "") != 0) {
-        if (!data->source->active && !data->camera) {
+    if (data->camera_name && strcmp(data->camera_name, "") != 0) {
+        if (!obs_source_active(data->source) && !data->camera) {
             timelapse_terminate(data);
             pthread_mutex_lock(&data->camera_mutex);
             timelapse_init(data);
             pthread_mutex_unlock(&data->camera_mutex);
             obs_source_update_properties(data->source);
-            if(data->autofocus) {
+            if (data->autofocus) {
                 pthread_mutex_lock(&data->camera_mutex);
                 set_autofocus(data->camera, data->gp_context);
                 pthread_mutex_unlock(&data->camera_mutex);
             }
         }
-    }else{
+    } else {
         data->width = 0;
         data->height = 0;
         obs_enter_graphics();
+        if (data->texture) gs_texture_destroy(data->texture);
         data->texture = gs_texture_create(data->width, data->height, GS_BGRA, 1, NULL, GS_DYNAMIC);
         obs_leave_graphics();
     }
@@ -332,12 +347,12 @@ static void timelapse_show(void *vptr) {
 
 static void timelapse_hide(void *vptr) {
     struct timelapse_data *data = vptr;
-    if(data->source->active) {
+    if (obs_source_active(data->source)) {
         timelapse_terminate(data);
     }
 }
 
-static void *timelapse_create(obs_data_t *settings, obs_source_t *source){
+static void *timelapse_create(obs_data_t *settings, obs_source_t *source) {
     struct timelapse_data *data = bzalloc(sizeof(struct timelapse_data));
 
     pthread_mutex_init(&data->camera_mutex, NULL);
@@ -360,9 +375,10 @@ static void *timelapse_create(obs_data_t *settings, obs_source_t *source){
 #if HAVE_UDEV
     gphoto_init_udev();
     signal_handler_t *sh = gphoto_get_udev_signalhandler();
-
-    signal_handler_connect(sh, "device_added", &timelapse_camera_added, data);
-    signal_handler_connect(sh, "device_removed", &timelapse_camera_removed, data);
+    if (sh) {
+        signal_handler_connect(sh, "device_added", &timelapse_camera_added, data);
+        signal_handler_connect(sh, "device_removed", &timelapse_camera_removed, data);
+    }
 #endif
 
     return data;
@@ -370,26 +386,31 @@ static void *timelapse_create(obs_data_t *settings, obs_source_t *source){
 
 static void timelapse_destroy(void *vptr) {
     struct timelapse_data *data = vptr;
+    if (!data) return;
 
-    if(data->source->active){
+    if (obs_source_active(data->source)) {
         timelapse_terminate(data);
     }
 
     pthread_mutex_destroy(&data->camera_mutex);
-    gp_context_unref(data->gp_context);
-    gp_list_free(data->cam_list);
+    if (data->gp_context) gp_context_unref(data->gp_context);
+    if (data->cam_list) gp_list_free(data->cam_list);
 
-    obs_enter_graphics();
-    gs_texture_destroy(data->texture);
-    data->texture = NULL;
-    obs_leave_graphics();
+    if (data->texture) {
+        obs_enter_graphics();
+        gs_texture_destroy(data->texture);
+        data->texture = NULL;
+        obs_leave_graphics();
+    }
 
+#if HAVE_UDEV
     signal_handler_t *sh = gphoto_get_udev_signalhandler();
-
-    signal_handler_disconnect(sh, "device_added", timelapse_camera_added, data);
-    signal_handler_disconnect(sh, "device_removed", timelapse_camera_removed, data);
-
+    if (sh) {
+        signal_handler_disconnect(sh, "device_added", timelapse_camera_added, data);
+        signal_handler_disconnect(sh, "device_removed", timelapse_camera_removed, data);
+    }
     gphoto_unref_udev();
+#endif
 
     bfree(vptr);
 }
@@ -407,6 +428,8 @@ static uint32_t timelapse_getheight(void *vptr) {
 static void timelapse_render(void *vptr, gs_effect_t *effect) {
     struct timelapse_data *data = vptr;
 
+    if (!data || !data->texture) return;
+
     gs_reset_blend_state();
     gs_effect_set_texture(gs_effect_get_param_by_name(effect, "image"), data->texture);
     gs_draw_sprite(data->texture, 0, data->width, data->height);
@@ -414,33 +437,37 @@ static void timelapse_render(void *vptr, gs_effect_t *effect) {
 
 static void timelapse_tick(void *vptr, float seconds) {
     struct timelapse_data *data = vptr;
-    void *event_data;
+    void *event_data = NULL;
     CameraEventType evtype;
     CameraFilePath *path;
     CameraFile *cam_file = NULL;
     const char *image_data = NULL;
-    unsigned long data_size = NULL;
+    size_t data_size = 0;
     Image *image = NULL;
-    ImageInfo *image_info = AcquireImageInfo();
-    ExceptionInfo *exception = AcquireExceptionInfo();
+    ImageInfo *image_info = NULL;
+    ExceptionInfo *exception = NULL;
 
-    if(data->camera){
+    if (data->camera) {
         pthread_mutex_lock(&data->camera_mutex);
         data->time_elapsed += seconds;
         if (data->time_elapsed >= data->interval && data->interval > 0) {
             gphoto_capture(data->camera, data->gp_context, data->width, data->height, data->texture_data);
 
-            obs_enter_graphics();
-            gs_texture_set_image(data->texture, data->texture_data, data->width * 4, false);
-            obs_leave_graphics();
+            if (data->texture && data->texture_data) {
+                obs_enter_graphics();
+                gs_texture_set_image(data->texture, data->texture_data, data->width * 4, false);
+                obs_leave_graphics();
+            }
 
             data->time_elapsed = 0;
         } else {
             gp_camera_wait_for_event(data->camera, 100, &evtype, &event_data, data->gp_context);
             path = event_data;
-            if (evtype == GP_EVENT_FILE_ADDED) {
+            if (evtype == GP_EVENT_FILE_ADDED && path) {
+                image_info = AcquireImageInfo();
+                exception = AcquireExceptionInfo();
                 if (gp_file_new(&cam_file) < GP_OK) {
-                    blog(LOG_WARNING, "What???\n");
+                    blog(LOG_WARNING, "Failed to create CameraFile.\n");
                 } else {
                     if (gp_camera_file_get(data->camera, path->folder, path->name,
                                            GP_FILE_TYPE_NORMAL, cam_file, data->gp_context) < GP_OK) {
@@ -453,18 +480,18 @@ static void timelapse_tick(void *vptr, float seconds) {
                             image = BlobToImage(image_info, image_data, data_size, exception);
                             if (exception->severity != UndefinedException) {
                                 CatchException(exception);
-                                blog(LOG_WARNING, "ImageMagic error: %s.\n", (char *) exception->severity);
+                                blog(LOG_WARNING, "ImageMagick error: %s.\n", exception->reason ? exception->reason : "Unknown");
                                 exception->severity = UndefinedException;
-                            } else {
-                                ExportImagePixels(image, 0, 0, (const size_t) data->width,
-                                                  (const size_t) data->height,
+                            } else if (image) {
+                                ExportImagePixels(image, 0, 0, (size_t) data->width,
+                                                  (size_t) data->height,
                                                   "BGRA", CharPixel, data->texture_data,
                                                   exception);
                                 if (exception->severity != UndefinedException) {
                                     CatchException(exception);
-                                    blog(LOG_WARNING, "ImageMagic error: %s.\n", (char *) exception->severity);
+                                    blog(LOG_WARNING, "ImageMagick error: %s.\n", exception->reason ? exception->reason : "Unknown");
                                     exception->severity = UndefinedException;
-                                } else {
+                                } else if (data->texture && data->texture_data) {
                                     obs_enter_graphics();
                                     gs_texture_set_image(data->texture, data->texture_data, data->width * 4, false);
                                     obs_leave_graphics();
@@ -478,9 +505,6 @@ static void timelapse_tick(void *vptr, float seconds) {
         pthread_mutex_unlock(&data->camera_mutex);
     }
 
-    if (image_data) {
-        free(image_data);
-    }
     if (image_info) {
         DestroyImageInfo(image_info);
     }
@@ -491,8 +515,7 @@ static void timelapse_tick(void *vptr, float seconds) {
         DestroyExceptionInfo(exception);
     }
     if (cam_file) {
-        //TODO: SIGSEGV here, can't understand why!
-        //gp_file_free(cam_file);
+        gp_file_unref(cam_file);
     }
 }
 
