@@ -4,6 +4,8 @@ obs-gphoto
 
 Allows connect DSLR cameras with obs-studio through gPhoto on Linux. At now tested on Canon and Nikon cameras.
 
+Donate the original developer:
+
 .. image:: https://img.shields.io/badge/Donate-PayPal-blue.svg
     :target: https://www.paypal.me/AeternusAtterratio
 .. image:: https://img.shields.io/badge/Donate-YaMoney-orange.svg
@@ -35,13 +37,6 @@ REQUIREMENTS
 INSTALLATION
 ============
 
-For ArchLinux:
---------------
-
-    there is a `package in AUR`_.
-        .. _`package in AUR`: https://aur.archlinux.org/packages/obs-gphoto/
-        
-
 For installation from source:
 =============================
 
@@ -51,8 +46,8 @@ Install requirements: :code:`dnf install libgphoto2-devel  obs-studio-devel Imag
 
 General:
 --------
-* :code:`git clone https://github.com/Atterratio/obs-gphoto`
-* :code:`cd obs-gphoto`
+* :code:`git clone https://github.com/blackhawkworks/obs-gphoto-ng`
+* :code:`cd obs-gphoto-ng`
 * :code:`cmake . -DSYSTEM_INSTALL=0` for local installation or :code:`cmake . -DSYSTEM_INSTALL=1` for system installation
 * :code:`make`
 * :code:`make install`
