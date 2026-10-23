@@ -2,7 +2,7 @@
 obs-gphoto
 ==========
 
-Allows connect DSLR cameras with obs-studio through gPhoto on Linux. At now tested only Canon cameras.
+Allows connect DSLR cameras with obs-studio through gPhoto on Linux. At now tested on Canon and Nikon cameras.
 
 .. image:: https://img.shields.io/badge/Donate-PayPal-blue.svg
     :target: https://www.paypal.me/AeternusAtterratio
